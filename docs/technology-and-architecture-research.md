@@ -1,141 +1,325 @@
-# MaaYuan 技术栈与架构调研
+# MaaYuan 原生运行时与 Yuan 国际服架构调研
 
 日期：2026-09-07
 
+## 前提修正
+
+本调研基于两个明确约束：
+
+1. 目标运行时不使用 Python。Rust 或 Go 只作为官方 Maa 运行时的调用方和扩展进程，不维护 Python Agent。
+2. “国际服”指 **Yuan / 代号鸢**，当前至少包含港服与台服；不是泛化的 EN/JP/KR 多语言项目，也不是如鸢国服。
+
+因此，先前“先优化 Python、再评估 Rust”的路线不再适用。Python 只能作为迁移期的遗留兼容层，不能进入目标架构。
+
 ## 结论
 
-不建议立即把整个 MaaYuan 重写为 Rust 或 Go。MaaFramework 的截图、OCR、模板匹配、控制器调度和 Pipeline 执行核心本身是 C++ 原生实现；当前 Python Agent 只有约 1.7k 行，主要承担少量自定义动作、识别和数据表匹配。直接换语言不会加速识别主路径，反而会引入新的构建、绑定和发布风险。
+### 不应使用原始 MaaAssistantArknights 核心
 
-更有效的重构路径是：
+[MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights) 虽然提供 C / Go / Rust 等调用接口，但它的任务 API 和资源协议是明日方舟专用的。其 `StartUp`、`Fight`、`Recruit`、基建、肉鸽等任务类型与明日方舟资源深度耦合，客户端枚举也是 `Official`、`Bilibili`、`txwy`、`YoStarEN`、`YoStarJP`、`YoStarKR`。
 
-1. 先做架构中立重构：升级 Project Interface V2、拆分巨型 `interface.json`、引入分层资源包和界面 i18n。
-2. 把 Excel 运行时解析改为构建期生成的 JSON，移除 `pandas` / `openpyxl`，并延迟或替换 Python `opencv-python` 依赖。
-3. 为自定义热点逻辑建立可复现 benchmark 和截图回放测试。
-4. 用 Rust 做一个独立 Agent PoC，验证启动时间、内存、包体和维护成本后，再决定是否替换 Python Agent。
-5. Go 绑定目前仍是 beta，适合观察，不建议作为核心重写首选。
+它不能作为代号鸢的业务运行时。强行复用只会得到一个不可维护的 fork。
 
-## 参考项目
+### 应使用官方上游 MaaFramework
 
-### MAA
+MaaYuan 的正确基础是 [MaaFramework](https://github.com/MaaXYZ/MaaFramework) 官方上游发行版：
 
-[MaaAssistantArknights](https://github.com/MaaAssistantArknights/MaaAssistantArknights) 是原始 MAA 项目，主体为 C++，并使用独立 GUI。它不是 MaaFramework 项目，但提供了两点经验：
+- 官方 C ABI 承担截图、OCR、模板匹配、Pipeline 执行和控制器调度。
+- 官方 Project Interface 描述资源、任务和 Agent。
+- Rust / Go 二进制只实现薄的业务编排与少量自定义 Recognition / Action。
+- 不 fork MaaFramework；版本、ABI 和安全更新必须跟随上游。
 
-- 高性能识别核心由 C++ / OpenCV / PaddleOCR / ONNX Runtime 承担。
-- 国际服适配主要依赖资源与文本差异分层；项目文档明确说明，大部分外服适配可以由截图和 JSON 修改完成。
-
-### M9A
-
-[M9A](https://github.com/MAA1999/M9A) 是当前最值得借鉴的 MaaFramework 项目：
-
-- 使用 Project Interface V2 和 `import` 拆分任务文件。
-- `resource/base`、`global_jp`、`global_en`、`global_kr`、`tw` 分层加载，后加载资源覆盖前者。
-- 界面文本使用 `$key` 加多语言表，并通过校验器保证各语言 key 一致。
-- Python 使用 `uv`、Ruff、Pyright strict、pytest、Prettier、schema 与 i18n 校验。
-- 提供 AGENTS.md、CONTRIBUTING.md、PR 模板和多类 CI 工作流。
-
-M9A 的国际服资源层非常小，而当前 MaaYuan 的 `base` 与 `zh_tw` 几乎是两套完整拷贝。这是支持国际服前必须消除的结构性阻力。
-
-### MaaNTE
-
-[MaaNTE](https://github.com/1bananachicken/MaaNTE) 的重点是国际化和透明度：
-
-- 维护 `zh_cn`、`zh_tw`、`en_us`、`ja_jp`、`ko_kr` 界面与 Agent 文本。
-- 使用定时 workflow 从翻译仓库同步 OCR `expected` 文本，并通过自动 PR 审核变更。
-- AGENTS.md 对 Pipeline 命名、坐标、硬延迟、重试、OCR 文本和日志都有明确约束。
-
-这套模式适合 MaaYuan 处理多服 OCR 差异，避免手工复制 Pipeline。
-
-### 官方模板与工具
-
-[MaaPracticeBoilerplate](https://github.com/MaaXYZ/MaaPracticeBoilerplate) 展示了官方推荐结构、schema 校验、资源检查和安装流程。MaaYuan 当前检查链路明显落后于模板，应优先补齐 JSON schema、Pipeline 校验和打包 dry-run。
-
-## Rust / Go 与 MaaFramework 相性
-
-MaaFramework 通过 C ABI 与 AgentServer 支持跨语言扩展。官方文档明确推荐 AgentServer 用于复杂自定义识别和动作，并强调多进程隔离与多语言支持。
-
-### Rust
-
-[官方 Rust Binding](https://github.com/MaaXYZ/maa-framework-rs) 当前发布 `v1.23.0`，覆盖 Tasker、Resource、Controller、AgentClient、AgentServer、自定义识别和动作。它支持静态 / 动态链接、`Result` 错误处理和严格类型。
-
-本次验证：
-
-- 使用 MaaFramework `v5.13.0-beta.6` SDK。
-- `cargo check --workspace` 通过。
-- 绑定自带多进程 AgentServer 集成测试；单测和部分集成测试可运行，完整测试需要仓库内测试数据子模块。
-
-判断：
-
-- 优点：启动快、内存低、类型安全、二进制发布清晰，官方绑定功能完整。
-- 风险：生态案例少；需要维护各平台 SDK 与二进制矩阵；图像、Excel、文本归一化等开发成本高于 Python；当前项目仍使用 MaaFW `5.0.5`，而绑定对应 `5.13.0-beta.6`，升级必须先行。
-
-### Go
-
-[官方 Go Binding](https://github.com/MaaXYZ/maa-framework-go) 当前为 `v4.0.0-beta.18`，无需 cgo，基于 purego，声明支持 AgentClient、AgentServer、自定义识别和动作。
-
-本次验证：
-
-- AgentServer 示例可编译，API 覆盖存在。
-- 使用旧 MaaFW `5.0.5` 时无法加载新符号。
-- 使用 `5.13.0-beta.6` 后基础包可加载，但本机完整测试仍有若干失败，且该版本仍是 pre-release。
-
-判断：
-
-- 优点：交叉编译和工具链简单，Agent API 明确，无 cgo。
-- 风险：beta 状态、运行时仍依赖原生库、错误处理和类型表达弱于 Rust；在 MaaYuan 这种图像和文本逻辑较多的项目中收益不确定。
-
-## 当前仓库量化发现
-
-- `assets/resource/base`：598 个文件，约 10.1 MB。
-- `assets/resource/zh_tw`：470 个文件，约 6.5 MB。
-- 两边相对路径相同的文件 445 个，其中 316 个内容完全一致。
-- 仅 `base` 中与 `zh_tw` 完全重复的内容约 4.97 MB。
-- Pipeline 中约 1790 个 OCR 节点、1757 个 OCR `expected` 字符串。
-- `interface.json` 集中维护 47 个任务、130 个选项、21 个高级配置，且没有 `interface_version` / `languages`。
-
-这些问题会导致：
-
-- 国际服新增语言时复制成本线性增长。
-- OCR 文案修改难以 review 和自动同步。
-- 任务与选项冲突难以定位。
-- 无法用 M9A 式 i18n 校验保障完整性。
-
-## 建议目标架构
+换句话说，目标不是“用 Rust / Go 重写 Maa”，而是：
 
 ```text
-interface.json                 # 只保留元数据、controller/resource/import 声明
-tasks/*.json                   # 按功能拆分任务与选项
-i18n/{zh_cn,zh_tw,en_us}.json  # 界面文本
-resource/base/                 # 与语言无关的模板、流程和模型
-resource/zh_tw/                # 仅覆盖繁中差异
-resource/global/               # 国际服差异层
-agent/                          # 自定义逻辑，先 Python 后评估 Rust
-tools/                          # schema/i18n/resource/build 校验
-tests/                          # 静态测试 + 截图回放 + Agent 单测
+官方 MaaFramework 原生库
+        +
+Rust/Go 宿主或 AgentServer
+        +
+Yuan / 如鸢资源与任务声明
 ```
 
-### 国际服策略
+## Rust 与 Go 选择
 
-1. 先确认目标包体和 UI 语言矩阵：简中、繁中、英文、日文、韩文，以及不同发行渠道的窗口 / 包名。
-2. 把 OCR `expected` 从 Pipeline 中抽取为可比较的翻译清单，构建时回填或生成覆盖层。
-3. 每个 locale 只保存差异 Pipeline、差异图片和 OCR 映射，禁止整目录复制。
-4. 为每个 locale 建立固定截图 fixture，至少覆盖启动、主页、日常入口、弹窗和结算画面。
-5. 在 interface V2 中声明 resource/controller 兼容矩阵，避免不支持组合被误选。
+### Rust：目标首选
 
-## 开发透明度方案
+[官方 Rust Binding](https://github.com/MaaXYZ/maa-framework-rs) 当前覆盖：
 
-- 引入 ADR 目录，记录语言、资源分层、国际服和发布策略决策。
-- 使用 M9A 式 `pnpm check` 聚合 schema、i18n、JSON、Python lint、typecheck 和测试。
-- PR 必须写明影响的服务器、界面语言、验证截图和资源路径。
-- 为 Pipeline 变更生成节点级证据，可结合 MaaLogAnalyzer 或自定义回调导出。
-- 维护风险矩阵：每个任务标注 CN / TW / Global 支持状态。
+- Tasker
+- Resource
+- Controller
+- AgentClient
+- AgentServer
+- 自定义 Recognition
+- 自定义 Action
+- 静态 / 动态链接
+
+本次使用 MaaFramework `v5.13.0-beta.6` SDK 验证：
+
+```bash
+cargo check --workspace
+```
+
+结果通过。绑定仓库也包含多进程 AgentServer 集成测试。
+
+选择 Rust 的理由：
+
+- 官方绑定功能完整；
+- 类型和错误处理适合长期单人维护；
+- Agent 二进制启动快、内存占用低；
+- 数据结构可由 serde 强类型建模；
+- 不需要 Python 解释器、pip、pandas 或 Python OpenCV 包；
+- 更容易在 CI 中做格式化、clippy、测试和二进制矩阵。
+
+主要代价：
+
+- 需要维护 MaaFramework SDK 与绑定版本的严格配对；
+- Windows / Linux / macOS 的动态库复制和打包更复杂；
+- 图像与文本处理开发效率低于 Python。
+
+### Go：保留为备选，不作为当前主线
+
+[官方 Go Binding](https://github.com/MaaXYZ/maa-framework-go) 具备 AgentServer API，并使用 purego 避免 cgo。但当前版本仍是 `v4.0.0-beta.18`。
+
+实测结论：
+
+- AgentServer 示例可编译；
+- MaaFW `5.0.5` 缺少新 ABI 符号，无法直接配合当前绑定；
+- 使用 `5.13.0-beta.6` 后基础库可加载，但完整测试仍存在失败项；
+- 其稳定性和错误边界不如 Rust Binding。
+
+Go 的优势是交叉编译和工具链简单，但在本项目里并不能消除 MaaFramework 原生库依赖，且绑定仍处于 beta。因此：
+
+```text
+主线：Rust
+备选：Go，等待官方 binding 稳定后再做等价 PoC
+```
+
+## 目标架构
+
+```text
+bin/maayuan-agent(.exe)       # Rust AgentServer
+interface.json                # Project Interface V2 入口
+tasks/*.json                  # 按功能拆分的任务与选项
+i18n/*.json                   # 界面文案，不代表游戏 UI 语言
+resource/game/common/         # 与版本和语言无关的流程、模板
+resource/lang/zh_hans/        # 简中游戏 UI 差异
+resource/lang/zh_hant/        # 繁中游戏 UI 差异
+resource/dist/ruyuan-cn/      # 如鸢国服包名与渠道差异
+resource/dist/yuan-hk/        # 代号鸢港服包名与渠道差异
+resource/dist/yuan-tw/        # 代号鸢台服包名与渠道差异
+data/*.json                   # 构建期生成的强类型业务数据
+tools/                        # schema、资源、数据、打包校验
+```
+
+### Agent 边界
+
+目标 interface 中的 Agent 配置应为：
+
+```json
+{
+  "agent": {
+    "child_exec": "{PROJECT_DIR}/bin/maayuan-agent",
+    "child_args": []
+  }
+}
+```
+
+Project Interface V2 会在启动 Agent 时注入：
+
+- `PI_CLIENT_NAME`
+- `PI_CLIENT_LANGUAGE`
+- `PI_CLIENT_MAAFW_VERSION`
+- `PI_CONTROLLER`
+- `PI_RESOURCE`
+
+Rust Agent 应解析 `PI_RESOURCE`，而不是让用户手动选择游戏版本。这样可以保证：
+
+```text
+资源包选择 = 游戏发行版本 + 游戏 UI 语言
+```
+
+### 官方 GUI
+
+初期不重写 GUI。继续使用官方 MFAAvalonia / MXU 加载 Project Interface V2。这样可以把重构范围限制在：
+
+```text
+资源结构 + 原生 Agent + CI / 发布
+```
+
+等原生架构稳定后，再评估是否需要独立 CLI 或 GUI。
+
+## Yuan 国际服资源模型
+
+当前仓库事实如下。
+
+### 简中资源
+
+```text
+assets/resource/base
+```
+
+同时服务：
+
+- 如鸢国服；
+- 代号鸢港服，且现有文档说明港服可使用简中界面。
+
+港包名：
+
+```text
+com.qookkagames.codekite.gw.hk
+```
+
+### 繁中资源
+
+```text
+assets/resource/zh_tw
+```
+
+主要服务代号鸢台服。
+
+台包名：
+
+```text
+com.sialiagames.codekite.gw.tw
+```
+
+### 目标组合
+
+Project Interface V2 的 resource path 应按顺序叠加：
+
+| 目标 | 资源组合 |
+| --- | --- |
+| 如鸢国服 | `game/common` + `lang/zh_hans` + `dist/ruyuan-cn` |
+| 代号鸢港服 | `game/common` + `lang/zh_hans` + `dist/yuan-hk` |
+| 代号鸢台服 | `game/common` + `lang/zh_hant` + `dist/yuan-tw` |
+
+后加载资源覆盖先前资源。这样：
+
+- 不再复制整套 `base` / `zh_tw`；
+- 包名和渠道差异独立维护；
+- OCR 文案按游戏 UI 语言维护；
+- 任务可用性按发行版本声明。
+
+当前统计显示，`base` 与 `zh_tw` 有 316 个内容完全一致的重复文件，约 4.97 MB。这部分应由差异层消除。
+
+### 能力矩阵
+
+现有文档已提示：
+
+- 心纸营建偏港服限定；
+- 地宫主要测试如鸢国服；
+- 部分通用导航明确兼容国服与港服简中。
+
+重构后必须把这些经验显式化为 `task.resource` 过滤条件，而不是写在文档里靠用户猜测。
+
+## 数据处理
+
+目标运行时禁止读取 XLSX。
+
+当前 `agent/*.xlsx` 应改为构建期输入：
+
+```text
+sources/*.xlsx
+        |
+        | tools/convert-data
+        v
+data/*.json
+```
+
+Rust Agent 使用 serde 加载 JSON：
+
+- 题库；
+- 大富翁事件；
+- 派遣策略；
+- 文本规范化映射；
+- OCR 匹配数据。
+
+这样可以移除：
+
+```text
+pandas
+openpyxl
+```
+
+少量颜色识别应在 Rust Agent 中实现，或优先改写为 MaaFramework Pipeline 内建 Recognition，避免引入 Python OpenCV。
+
+## CI 与发布策略
+
+### 当前报错与修复
+
+本次 fork CI 的 `install` workflow 在 Windows 两个架构失败：
+
+```text
+ModuleNotFoundError: No module named 'install_common'
+```
+
+原因是 Windows embedded Python 通过 `python._pth` 使用隔离 `sys.path`，没有自动加入脚本目录。
+
+已在 `install4release.py` 中显式插入项目根目录。修复后推送的 `check` 与 `install` workflow 均已通过。
+
+### 迁移期 CI
+
+在 Python Agent 删除前，应同时保留：
+
+```text
+legacy Python package artifact
+native Rust agent artifact
+```
+
+Native job 应包含：
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+cargo build --release
+```
+
+### 目标 CI
+
+Native 达到功能对等后删除：
+
+- `setup_embed_python.py`
+- Python agent 打包步骤；
+- `requirements.txt` 运行时依赖；
+- pip mirror 探测；
+- Python 嵌入式包下载。
+
+目标矩阵：
+
+| 平台 | 架构 |
+| --- | --- |
+| Windows | x86_64, aarch64 |
+| Linux | x86_64, aarch64 |
+| macOS | x86_64, aarch64 |
+
+每个平台必须校验：
+
+1. 官方 MaaFramework 版本；
+2. Rust binding ABI 版本；
+3. Rust Agent 是否能启动 AgentServer；
+4. Project Interface V2 schema；
+5. Pipeline schema；
+6. Yuan 三种资源组合是否可加载；
+7. 截图回放是否通过。
 
 ## 实施顺序
 
-1. **基础治理**：补 CONTRIBUTING、PR 模板、schema 校验、Pipeline 校验和 Python 测试。
-2. **接口升级**：迁移 Project Interface V2，拆分 `interface.json`，引入 i18n。
-3. **资源瘦身**：把 `zh_tw` 改为差异覆盖层，删除 316 个重复文件。
-4. **依赖瘦身**：Excel 构建期转 JSON，移除 pandas / openpyxl，处理 cv2 与 zhconv。
-5. **国际服 PoC**：选择启动和日常两条链路建立 global 资源层与截图回放。
-6. **Rust Agent PoC**：迁移一个自定义识别和一个自定义动作，量化启动、内存、包体和正确性。
+1. **版本配对**：固定官方 MaaFramework 与 Rust Binding 的兼容矩阵，先支持一个稳定版本。
+2. **Rust Agent PoC**：实现 AgentServer，迁移一个 Recognition 和一个 Action。
+3. **数据构建**：XLSX 转 JSON，定义 serde 类型，移除运行时 Excel。
+4. **Interface V2**：拆分任务文件，声明 controller / resource / task.resource。
+5. **Yuan 分层**：建立 `common + lang + dist` 三层资源，消除重复文件。
+6. **截图回放**：为港服简中、台服繁中、如鸢国服建立固定场景测试。
+7. **并行发布**：同时打包 legacy 与 native，标记 native 为 experimental。
+8. **切换默认**：native 通过能力矩阵和回放测试后删除 Python。
 
-只有第 6 步数据明显优于优化后的 Python Agent，才应推进完整 Rust 化。Go 则建议等官方绑定稳定后再评估。
+## 决策
+
+在“目标绝不用 Python”的前提下，推荐：
+
+```text
+官方 MaaFramework + Rust AgentServer + Project Interface V2
+```
+
+Go 不排除，但只应在官方 Go Binding 稳定后作为备选实验，不作为当前重构主线。
