@@ -1,77 +1,64 @@
-import sys  # 1. 导入 sys 模块
-from pathlib import Path
 import shutil
+import sys
+from pathlib import Path
 
-assets_dir = Path(__file__).parent / "assets"
+
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+ENGLISH_MODEL_VERSION = "ppocr_v4"
 
 
-def configure_ocr_model():
-    if not (assets_dir / "MaaCommonAssets" / "OCR").exists():
-        print(
-            'Please clone this repository completely, don’t miss "--recursive", and don’t download the zip package!'
-        )
-        print('请完整克隆本仓库，不要漏掉 "--recursive"，也不要下载 zip 包！')
-        exit(1)
-
-    if sys.platform == "darwin":
-        zh_model_version = "ppocr_v4"
-        print("Detected macOS, will use ppocr_v4 for Chinese OCR model.")
-    else:
-        zh_model_version = "ppocr_v5"
-        print(f"Detected OS: {sys.platform}. Will use ppocr_v5 for Chinese OCR model.")
-
-    zh_model_source_path = (
-        assets_dir / "MaaCommonAssets" / "OCR" / zh_model_version / "zh_cn"
+def _fail_missing_submodule() -> None:
+    print(
+        'Please clone this repository completely, don’t miss "--recursive", '
+        "and don’t download the zip package!"
     )
+    print('请完整克隆本仓库，不要漏掉 "--recursive"，也不要下载 zip 包！')
+    raise SystemExit(1)
 
-    zh_cn_ocr_dir = assets_dir / "resource" / "base" / "model" / "ocr"
-    if not zh_cn_ocr_dir.exists():
-        print(f"Copying {zh_model_version} zh_cn model to: {zh_cn_ocr_dir}")
-        shutil.copytree(
-            zh_model_source_path,
-            zh_cn_ocr_dir,
-            dirs_exist_ok=True,
-        )
-    else:
-        print("Found existing zh_cn OCR directory, skipping default OCR model import.")
 
-    zh_tw_ocr_dir = assets_dir / "resource" / "zh_tw" / "model" / "ocr"
-    if not zh_tw_ocr_dir.exists():
-        print(f"Copying {zh_model_version} zh_cn model to: {zh_tw_ocr_dir}")
-        shutil.copytree(
-            zh_model_source_path,
-            zh_tw_ocr_dir,
-            dirs_exist_ok=True,
-        )
-    else:
-        print("Found existing zh_tw OCR directory, skipping default OCR model import.")
+def _configure_resource(resource_name: str, chinese_model_version: str) -> None:
+    common_ocr = ASSETS_DIR / "MaaCommonAssets" / "OCR"
+    chinese_source = common_ocr / chinese_model_version / "zh_cn"
+    english_source = common_ocr / ENGLISH_MODEL_VERSION / "en_us"
+    if not chinese_source.is_dir() or not english_source.is_dir():
+        _fail_missing_submodule()
 
-    en_ocr_dir = assets_dir / "resource" / "base" / "model" / "ocr" / "en"
-    if not en_ocr_dir.exists():
-        shutil.copytree(
-            assets_dir / "MaaCommonAssets" / "OCR" / "ppocr_v4" / "en_us",
-            en_ocr_dir,
-            dirs_exist_ok=True,
-        )
-    else:
-        print(
-            "Found existing en OCR directory in base, skipping default OCR model import."
-        )
+    model_dir = ASSETS_DIR / "resource" / resource_name / "model"
+    ocr_dir = model_dir / "ocr"
+    marker_path = model_dir / ".maayuan-ocr"
+    expected_marker = f"{chinese_model_version}\n{ENGLISH_MODEL_VERSION}\n"
+    try:
+        current_marker = marker_path.read_text(encoding="utf-8")
+    except OSError:
+        current_marker = None
+    if (
+        current_marker == expected_marker
+        and ocr_dir.is_dir()
+        and (ocr_dir / "en").is_dir()
+    ):
+        print(f"Found current OCR models for {resource_name}; skipping.")
+        return
 
-    en_ocr_dir2 = assets_dir / "resource" / "zh_tw" / "model" / "ocr" / "en"
-    if not en_ocr_dir2.exists():
-        shutil.copytree(
-            assets_dir / "MaaCommonAssets" / "OCR" / "ppocr_v4" / "en_us",
-            en_ocr_dir2,
-            dirs_exist_ok=True,
-        )
-    else:
-        print(
-            "Found existing en OCR directory in zh_tw, skipping default OCR model import."
-        )
+    print(
+        f"Installing {chinese_model_version}/zh_cn and "
+        f"{ENGLISH_MODEL_VERSION}/en_us OCR models for {resource_name}."
+    )
+    if ocr_dir.exists():
+        shutil.rmtree(ocr_dir)
+    shutil.copytree(chinese_source, ocr_dir)
+    shutil.copytree(english_source, ocr_dir / "en")
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(expected_marker, encoding="utf-8")
+
+
+def configure_ocr_model() -> None:
+    chinese_model_version = "ppocr_v4" if sys.platform == "darwin" else "ppocr_v5"
+    print(f"OCR model selection: zh_cn={chinese_model_version}, en_us=ppocr_v4")
+    for resource_name in ("base", "zh_tw"):
+        _configure_resource(resource_name, chinese_model_version)
 
 
 if __name__ == "__main__":
     configure_ocr_model()
-
     print("OCR model configured.")
