@@ -25,6 +25,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate JSON
+        run: python tools/ci/check_json.py assets
+
       # pip install maafw
       - name: Install maafw
         run: |
